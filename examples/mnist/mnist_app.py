@@ -4,9 +4,46 @@
 import tensorflow as tf
 import horovod.tensorflow as hvd
 
-layers = tf.contrib.layers
+# Adapted from http://alanwsmith.com/capturing-python-log-output-in-a-variable
 
-def make_model(feature, target, mode):
+import logging
+import io
+import collections
+
+class FIFOIO(io.TextIOBase):
+    def __init__(self, size, *args):
+        self.maxsize = size
+        io.TextIOBase.__init__(self, *args)
+        self.deque = collections.deque()
+    def getvalue(self):
+        return ''.join(self.deque)
+    def write(self, x):
+        self.deque.append(x)
+        self.shrink()
+    def shrink(self):
+        if self.maxsize is None:
+            return
+        size = sum(len(x) for x in self.deque)
+        while size > self.maxsize:
+            x = self.deque.popleft()
+            size -= len(x)
+
+def get_log_string(size):
+    log = logging.getLogger('tensorflow')
+    log.setLevel(logging.INFO)
+
+    log_string = FIFOIO(size)
+    lh = logging.StreamHandler(log_string)
+    lh.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    lh.setFormatter(formatter)
+    log.addHandler(lh)
+    
+    return log_string
+
+layers = tf.contrib.layers           
+
+def conv_model(feature, target, mode):
     """2-layer convolution model."""
     # Convert the target to a one-hot tensor of shape (batch_size, 10) and
     # with a on-value of 1 for each one-hot vector of length 10.
@@ -45,20 +82,3 @@ def make_model(feature, target, mode):
 
     return tf.argmax(logits, 1), loss
 
-def make_hooks(hvd_size, global_step, loss):
-
-    hooks = [
-        # Horovod: BroadcastGlobalVariablesHook broadcasts initial variable states
-        # from rank 0 to all other processes. This is necessary to ensure consistent
-        # initialization of all workers when training is started with random weights
-        # or restored from a checkpoint.
-        hvd.BroadcastGlobalVariablesHook(0),
-
-        # Horovod: adjust number of steps based on number of GPUs.
-        tf.train.StopAtStepHook(last_step=20000 // hvd.size()),
-
-        tf.train.LoggingTensorHook(tensors={'step': global_step, 'loss': loss},
-                                   every_n_iter=10),
-    ]
-
-    return hooks
